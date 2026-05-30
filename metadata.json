@@ -1,0 +1,8 @@
+{
+  "name": "AI Website Generator",
+  "description": "A professionally crafted AI website generator that dynamically designs fully responsive landing pages, creates customized layout sections, edits content live, and generates high-fidelity images using Gemini.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
