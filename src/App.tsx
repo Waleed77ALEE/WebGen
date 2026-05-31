@@ -111,7 +111,7 @@ const DEFAULT_WEBSITE: GeneratedWebsite = {
       description: 'Autonomous workflow automation for distributed creative teams. Scalable, secure, and designed to generate instant high-fidelity software assets within a single responsive view.',
       layout: 'split',
       imagePrompt: 'A glowing bright cybernetic computer monitor displaying green digital code, high-contrast dark room aesthetics',
-      imageUrl: '',
+      imageUrl: 'https://images.unsplash.com/photo-1555066931-4365d14bab8c?auto=format&fit=crop&w=1000&q=80',
     },
     {
       id: 'sec-services',
@@ -149,7 +149,7 @@ const DEFAULT_WEBSITE: GeneratedWebsite = {
       description: 'Our system breaks down the traditional boundaries of web design. By bypassing bloated libraries and generic framework templates, we assemble pristine, customized layout grids that prioritize readability, user focus, and bold brand presence above all else.',
       layout: 'split',
       imagePrompt: 'Minimal modern geometric architectural archway under clean ambient lighting',
-      imageUrl: '',
+      imageUrl: 'https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=1000&q=80',
     },
     {
       id: 'sec-testimonials',
