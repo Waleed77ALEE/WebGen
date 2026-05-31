@@ -47,10 +47,16 @@ import {
   Eye,
   Settings,
   History,
-  Info
+  Info,
+  Database,
+  User,
+  ShoppingCart,
+  LogIn,
+  LogOut
 } from 'lucide-react';
 import { GeneratedWebsite, WebsiteSection, SectionItem, SectionType, WebsiteTheme } from './types';
 import { generateFullHTML } from './utils/exporter';
+import { supabase, SQL_SCHEMA_BLUEPRINT } from './utils/supabase';
 
 // Custom Map for rendering correct Lucide components based on string names
 const iconMap: Record<string, React.ComponentType<any>> = {
@@ -215,9 +221,43 @@ export default function App() {
   const [customInstructions, setCustomInstructions] = useState('');
 
   // App control states
-  const [activeTab, setActiveTab] = useState<'generate' | 'theme' | 'sections' | 'history'>('generate');
+  const [activeTab, setActiveTab] = useState<'generate' | 'theme' | 'sections' | 'supabase' | 'history'>('generate');
   const [viewMode, setViewMode] = useState<'desktop' | 'mobile' | 'code'>('desktop');
   const [selectedSectionId, setSelectedSectionId] = useState<string | null>(null);
+
+  // SUPABASE BACKEND STATES
+  const [dbUser, setDbUser] = useState<any>(null);
+  const [dbProfile, setDbProfile] = useState<any>(null);
+  const [userCart, setUserCart] = useState<any[]>([]);
+  const [userOrders, setUserOrders] = useState<any[]>([]);
+  const [dbStats, setDbStats] = useState({ users: 0, orders: 0, cart: 0, forms: 0 });
+  const [isStatsLoading, setIsStatsLoading] = useState(false);
+  const [statsError, setStatsError] = useState<string | null>(null);
+  
+  // Client Portal UX State (In-Landing Page)
+  const [isPortalOpen, setIsPortalOpen] = useState(false);
+  const [portalTab, setPortalTab] = useState<'auth' | 'cart' | 'orders' | 'profile'>('cart');
+  const [isAuthLoading, setIsAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authMessage, setAuthMessage] = useState<string | null>(null);
+  
+  // Custom auth forms states
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authFullName, setAuthFullName] = useState('');
+  const [authPhone, setAuthPhone] = useState('');
+  const [authAddress, setAuthAddress] = useState('');
+  const [isSignUp, setIsSignUp] = useState(false);
+
+  // Contact Form Inputs
+  const [contactName, setContactName] = useState('');
+  const [contactEmail, setContactEmail] = useState('');
+  const [contactMessage, setContactMessage] = useState('');
+  const [isSubmittingContact, setIsSubmittingContact] = useState(false);
+  const [contactSuccessMsg, setContactSuccessMsg] = useState('');
+
+  // Schema copying helper
+  const [isSchemaCopied, setIsSchemaCopied] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationLogs, setGenerationLogs] = useState<string[]>([]);
   
@@ -263,6 +303,542 @@ export default function App() {
     }));
     setStyleVibe(preset.name);
   };
+
+  // ==========================================
+  // SUPABASE INTEGRATION OPERATIONS & ENGINE
+  // ==========================================
+
+  // 1. Fetch live row counts for the Developer Stats Tab
+  const fetchSupabaseStats = async () => {
+    try {
+      setIsStatsLoading(true);
+      setStatsError(null);
+      
+      const { count: users, error: uErr } = await supabase
+        .from('profiles')
+        .select('*', { count: 'exact', head: true });
+        
+      const { count: orders, error: oErr } = await supabase
+        .from('orders')
+        .select('*', { count: 'exact', head: true });
+        
+      const { count: cart, error: cErr } = await supabase
+        .from('cart_items')
+        .select('*', { count: 'exact', head: true });
+        
+      const { count: forms, error: fErr } = await supabase
+        .from('contact_submissions')
+        .select('*', { count: 'exact', head: true });
+      
+      // If any table query triggers a missing relation error, we signal to the user to apply SQL schema
+      if (uErr || oErr || cErr || fErr) {
+        const primaryError = uErr || oErr || cErr || fErr;
+        if (primaryError?.code === '42P01') {
+          setStatsError("Tables not initialized yet. Execute the SQL blueprint in your Supabase console!");
+        } else {
+          setStatsError(primaryError?.message || "Connection active but tables query failed");
+        }
+      }
+
+      setDbStats({
+        users: users || 0,
+        orders: orders || 0,
+        cart: cart || 0,
+        forms: forms || 0
+      });
+    } catch (err: any) {
+      console.warn("Stats loading failed", err);
+      setStatsError("Failed to fetch database stats. Verify your table definitions.");
+    } finally {
+      setIsStatsLoading(false);
+    }
+  };
+
+  // 2. Fetch profile, historical orders, and active cart from Database for active user
+  const fetchUserData = async (userId: string) => {
+    try {
+      // Profile
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .single();
+        
+      if (profile) {
+        setDbProfile(profile);
+        setAuthFullName(profile.full_name || '');
+        setAuthPhone(profile.phone || '');
+        setAuthAddress(profile.address || '');
+      }
+
+      // Cart
+      const { data: cart } = await supabase
+        .from('cart_items')
+        .select('*')
+        .eq('user_id', userId);
+        
+      if (cart) {
+        setUserCart(cart);
+      }
+
+      // Orders
+      const { data: orders } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+        
+      if (orders) {
+        setUserOrders(orders);
+      }
+    } catch (error) {
+      console.error("Error refreshing active user session data", error);
+    }
+  };
+
+  // 3. User Authentication handlers (Sign In / Sign Up / Sign Out / Sync)
+  const handleSignUp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!authEmail || !authPassword) {
+      setAuthError("Email and password parameters are required");
+      return;
+    }
+    
+    try {
+      setIsAuthLoading(true);
+      setAuthError(null);
+      setAuthMessage(null);
+
+      const { data, error } = await supabase.auth.signUp({
+        email: authEmail,
+        password: authPassword,
+        options: {
+          data: {
+            full_name: authFullName || 'Client Member'
+          }
+        }
+      });
+
+      if (error) throw error;
+
+      if (data.user) {
+        setDbUser(data.user);
+        // Explicitly fallback create profile table row in case trigger isn't ready
+        const { error: profErr } = await supabase.from('profiles').upsert({
+          id: data.user.id,
+          email: authEmail,
+          full_name: authFullName || 'Client Member',
+          phone: authPhone,
+          address: authAddress,
+          updated_at: new Date().toISOString()
+        });
+
+        if (profErr) console.warn("Notice: Profiles trigger note or profile manual entry upsert details:", profErr);
+        
+        setAuthMessage("Account successfully created! Welcome to your secure client workspace portal!");
+        await fetchUserData(data.user.id);
+        
+        // Push guest cart up if we has guest items
+        if (userCart.length > 0) {
+          const syncedItems = userCart.map(item => ({
+            user_id: data.user!.id,
+            product_id: item.product_id,
+            title: item.title,
+            price: item.price,
+            quantity: item.quantity,
+            website_name: website.name
+          }));
+          await supabase.from('cart_items').insert(syncedItems);
+        }
+        
+        // Fresh reload
+        await fetchUserData(data.user.id);
+        fetchSupabaseStats();
+        setPortalTab('cart');
+      }
+    } catch (err: any) {
+      setAuthError(err.message || "An error occurred during secure account sign up.");
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
+
+  const handleSignIn = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!authEmail || !authPassword) {
+      setAuthError("Please input email and password both");
+      return;
+    }
+
+    try {
+      setIsAuthLoading(true);
+      setAuthError(null);
+      setAuthMessage(null);
+
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: authEmail,
+        password: authPassword
+      });
+
+      if (error) throw error;
+
+      if (data.user) {
+        setDbUser(data.user);
+        setAuthMessage("Logged in successfully!");
+        await fetchUserData(data.user.id);
+        
+        // Push guest cart up to database
+        const { data: existingCart } = await supabase.from('cart_items').select('*').eq('user_id', data.user.id);
+        const localCartItems = [...userCart];
+        
+        if (localCartItems.length > 0) {
+          for (const item of localCartItems) {
+            const alreadyExists = existingCart?.find(e => e.product_id === item.product_id);
+            if (alreadyExists) {
+              await supabase.from('cart_items').update({
+                quantity: alreadyExists.quantity + item.quantity
+              }).eq('id', alreadyExists.id);
+            } else {
+              await supabase.from('cart_items').insert({
+                user_id: data.user.id,
+                product_id: item.product_id,
+                title: item.title,
+                price: item.price,
+                quantity: item.quantity,
+                website_name: website.name
+              });
+            }
+          }
+        }
+
+        await fetchUserData(data.user.id);
+        fetchSupabaseStats();
+        setPortalTab('cart');
+      }
+    } catch (err: any) {
+      setAuthError(err.message || "Invalid authentication credentials, please review and try again");
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await supabase.auth.signOut();
+      setDbUser(null);
+      setDbProfile(null);
+      setUserCart([]);
+      setUserOrders([]);
+      setAuthMessage("Signed out safely.");
+      fetchSupabaseStats();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleSaveProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!dbUser) return;
+
+    try {
+      setIsAuthLoading(true);
+      setAuthError(null);
+      
+      const { error } = await supabase.from('profiles').upsert({
+        id: dbUser.id,
+        full_name: authFullName,
+        phone: authPhone,
+        address: authAddress,
+        email: dbUser.email,
+        updated_at: new Date().toISOString()
+      });
+
+      if (error) throw error;
+      setAuthMessage("Customer profile successfully updated!");
+      await fetchUserData(dbUser.id);
+      fetchSupabaseStats();
+    } catch (err: any) {
+      setAuthError(err.message || "Failed to update profile data.");
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
+
+  // 4. Cart interactions (Syncing with local states and server side Supabase records)
+  const handleAddToCart = async (product: { id: string, title: string, price: string }) => {
+    // Open portal sidebar automatically to give delightful visual feedback
+    setIsPortalOpen(true);
+    setPortalTab('cart');
+
+    // Clean price numerical display
+    const cleanPrice = product.price.replace(/[^\d.]/g, '') || '49';
+    
+    if (dbUser) {
+      try {
+        // Check if item is already in cart in DB
+        const { data: existing } = await supabase
+          .from('cart_items')
+          .select('*')
+          .eq('user_id', dbUser.id)
+          .eq('product_id', product.id)
+          .single();
+
+        if (existing) {
+          const { error } = await supabase
+            .from('cart_items')
+            .update({ quantity: existing.quantity + 1 })
+            .eq('id', existing.id);
+          if (error) throw error;
+        } else {
+          const { error } = await supabase
+            .from('cart_items')
+            .insert({
+              user_id: dbUser.id,
+              product_id: product.id,
+              title: product.title,
+              price: product.price,
+              quantity: 1,
+              website_name: website.name
+            });
+          if (error) throw error;
+        }
+        await fetchUserData(dbUser.id);
+        fetchSupabaseStats();
+      } catch (err) {
+        console.error("Cart DB sync failed, falling back locally", err);
+      }
+    } else {
+      // Local Cartesian implementation
+      setUserCart(prev => {
+        const index = prev.findIndex(item => item.product_id === product.id);
+        if (index !== -1) {
+          const copy = [...prev];
+          copy[index] = { ...copy[index], quantity: copy[index].quantity + 1 };
+          return copy;
+        } else {
+          return [...prev, {
+            id: `local-item-${Date.now()}`,
+            product_id: product.id,
+            title: product.title,
+            price: product.price,
+            quantity: 1,
+            website_name: website.name
+          }];
+        }
+      });
+    }
+  };
+
+  const handleUpdateCartQuantity = async (cartItemId: string, newQty: number) => {
+    if (newQty <= 0) {
+      handleRemoveFromCart(cartItemId);
+      return;
+    }
+
+    if (dbUser) {
+      try {
+        const { error } = await supabase
+          .from('cart_items')
+          .update({ quantity: newQty })
+          .eq('id', cartItemId);
+        if (error) throw error;
+        await fetchUserData(dbUser.id);
+        fetchSupabaseStats();
+      } catch (err) {
+        console.error(err);
+      }
+    } else {
+      setUserCart(prev => prev.map(item => item.id === cartItemId ? { ...item, quantity: newQty } : item));
+    }
+  };
+
+  const handleRemoveFromCart = async (cartItemId: string) => {
+    if (dbUser) {
+      try {
+        const { error } = await supabase
+          .from('cart_items')
+          .delete()
+          .eq('id', cartItemId);
+        if (error) throw error;
+        await fetchUserData(dbUser.id);
+        fetchSupabaseStats();
+      } catch (err) {
+        console.error(err);
+      }
+    } else {
+      setUserCart(prev => prev.filter(item => item.id !== cartItemId));
+    }
+  };
+
+  // 5. Checkout / Place order handler
+  const handlePlaceOrder = async () => {
+    if (userCart.length === 0) return;
+
+    try {
+      setIsAuthLoading(true);
+      setAuthError(null);
+
+      // Determine total price
+      const totalPrice = userCart.reduce((sum, item) => {
+        const numeric = parseFloat(item.price.replace(/[^\d.]/g, '')) || 49;
+        return sum + (numeric * item.quantity);
+      }, 0);
+
+      const shippingAddressStr = dbProfile?.address || authAddress || 'Handled Digitally';
+      const recipientNameStr = dbProfile?.full_name || authFullName || dbUser?.email || 'Guest Client';
+      const recipientPhoneStr = dbProfile?.phone || authPhone || 'None';
+
+      const orderRow = {
+        user_id: dbUser?.id || null, // Allow checkout as anonymous guest if not logged in
+        total_price: totalPrice,
+        status: 'pending',
+        shipping_address: shippingAddressStr,
+        recipient_name: recipientNameStr,
+        recipient_phone: recipientPhoneStr,
+        website_name: website.name,
+        items: userCart.map(i => ({ title: i.title, price: i.price, quantity: i.quantity })),
+        created_at: new Date().toISOString()
+      };
+
+      const { data: newOrder, error: oErr } = await supabase
+        .from('orders')
+        .insert([orderRow])
+        .select()
+        .single();
+
+      if (oErr) throw oErr;
+
+      // Clean the database cart if authenticated
+      if (dbUser) {
+        const { error: cleanCartErr } = await supabase
+          .from('cart_items')
+          .delete()
+          .eq('user_id', dbUser.id);
+        if (cleanCartErr) console.warn("Cart cleaning warning:", cleanCartErr);
+        await fetchUserData(dbUser.id);
+      } else {
+        setUserCart([]); // Standard guest clean
+      }
+
+      setAuthMessage(`Order placed successfully! Transaction ID: ${newOrder?.id?.substring(0, 8).toUpperCase()}`);
+      
+      // Update stats and histories
+      fetchSupabaseStats();
+      if (dbUser) {
+        setPortalTab('orders');
+      } else {
+        // If guest, show active cart with clear messages
+        setPortalTab('cart');
+      }
+    } catch (err: any) {
+      setAuthError(err.message || "Failed to submit transaction.");
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
+
+  // 6. Interactive landing page webform submission
+  const handleSubmitContactForm = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!contactName || !contactEmail) {
+      setContactSuccessMsg("Full name and email fields are required to deliver message.");
+      return;
+    }
+
+    try {
+      setIsSubmittingContact(true);
+      setContactSuccessMsg("");
+
+      const { error } = await supabase
+        .from('contact_submissions')
+        .insert([
+          {
+            website_name: website.name,
+            full_name: contactName,
+            email: contactEmail,
+            message: contactMessage || "No message included."
+          }
+        ]);
+
+      if (error) throw error;
+
+      setContactSuccessMsg("Inquiry submitted securely in database! Your support host will reach out shortly.");
+      setContactName('');
+      setContactEmail('');
+      setContactMessage('');
+      fetchSupabaseStats();
+    } catch (err: any) {
+      console.error(err);
+      setContactSuccessMsg(`Database offline or table missing: ${err.message || "Connection failure"}`);
+    } finally {
+      setIsSubmittingContact(false);
+    }
+  };
+
+  // 7. Auto simulated submissions generator
+  const triggerDevSubmissionsSimulate = async () => {
+    try {
+      setIsStatsLoading(true);
+      
+      // Submit a simulated inquiry
+      const dummySubmission = {
+        website_name: website.name,
+        full_name: `Simulated User ${Math.floor(Math.random() * 900) + 100}`,
+        email: `tester-${Date.now()}@example.com`,
+        message: "This is an automatic test submission populated securely into the database."
+      };
+
+      const { error } = await supabase
+        .from('contact_submissions')
+        .insert([dummySubmission]);
+
+      if (error) throw error;
+      fetchSupabaseStats();
+    } catch (err: any) {
+      alert(`Simulation failed: ${err.message || "Is the contact_submissions table created?"}`);
+    } finally {
+      setIsStatsLoading(false);
+    }
+  };
+
+  // 8. Auth state monitoring
+  useEffect(() => {
+    const initSessionSync = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user) {
+          setDbUser(session.user);
+          await fetchUserData(session.user.id);
+        }
+      } catch (e) {
+        console.warn("Initial session sync error", e);
+      }
+      
+      // Gather stats at setup
+      fetchSupabaseStats();
+    };
+
+    initSessionSync();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (session?.user) {
+        setDbUser(session.user);
+        await fetchUserData(session.user.id);
+      } else {
+        setDbUser(null);
+        setDbProfile(null);
+        setUserCart([]);
+        setUserOrders([]);
+      }
+      fetchSupabaseStats();
+    });
+
+    return () => {
+      subscription?.unsubscribe();
+    };
+  }, [website.name]);
+
+  // ==========================================
 
   // Inbound real-time updates for business description on standard inputs
   const handleEditSectionDirectly = (sectionId: string, updatedSection: WebsiteSection) => {
@@ -360,9 +936,10 @@ export default function App() {
 
         const data: GeneratedWebsite = await response.json();
         
-        // Ensure image prompts have valid placeholders initially
-        const finalizedData = {
+        // Ensure image prompts have valid placeholders initially, and assign unique IDs to sections and their items
+        const finalizedData: GeneratedWebsite = {
           ...data,
+          id: data.id || `web-${Date.now()}`,
           theme: {
             ...data.theme,
             // Fallbacks in case format came generic
@@ -372,7 +949,15 @@ export default function App() {
             accentColor: data.theme.accentColor || '#00FF41',
             fontSans: data.theme.fontSans || 'Space Grotesk',
             fontMono: 'JetBrains Mono'
-          }
+          },
+          sections: (data.sections || []).map((sec, secIdx) => ({
+            ...sec,
+            id: sec.id || `sec-${secIdx}-${Date.now()}`,
+            items: (sec.items || []).map((item, itemIdx) => ({
+              ...item,
+              id: item.id || `item-${secIdx}-${itemIdx}-${Date.now()}`
+            }))
+          }))
         };
 
         setWebsite(finalizedData);
@@ -420,7 +1005,11 @@ export default function App() {
       const completeRefinedSec: WebsiteSection = {
         ...updatedSectionData,
         id: randomizedId, // Ensure state matches
-        imageUrl: editingSection.imageUrl // Keep original image if generated
+        imageUrl: editingSection.imageUrl, // Keep original image if generated
+        items: (updatedSectionData.items || []).map((item: any, idx: number) => ({
+          ...item,
+          id: item.id || `item-refine-${idx}-${Date.now()}`
+        }))
       };
 
       handleEditSectionDirectly(randomizedId, completeRefinedSec);
@@ -461,10 +1050,19 @@ export default function App() {
 
       const generatedSec: WebsiteSection = await response.json();
       
+      const completeSec: WebsiteSection = {
+        ...generatedSec,
+        id: generatedSec.id || `sec-${Date.now()}`,
+        items: (generatedSec.items || []).map((item: any, idx: number) => ({
+          ...item,
+          id: item.id || `item-add-${idx}-${Date.now()}`
+        }))
+      };
+      
       // Push new section to layout
       setWebsite(prev => ({
         ...prev,
-        sections: [...prev.sections, generatedSec]
+        sections: [...prev.sections, completeSec]
       }));
 
       setNewSectionPrompt('');
@@ -573,28 +1171,35 @@ export default function App() {
         </div>
 
         {/* WORKSPACE SECTIONS MENU */}
-        <div className="flex border-b border-[#181818] text-xs font-mono select-none">
+        <div className="flex border-b border-[#181818] text-[10px] font-mono select-none">
           <button 
             onClick={() => setActiveTab('generate')}
             className={`flex-1 py-3 text-center border-b-2 transition-colors ${activeTab === 'generate' ? 'border-[#00FF41] text-white bg-[#121212]' : 'border-transparent text-neutral-400 hover:text-white'}`}
           >
-            01_GENERATE
+            GEN
           </button>
           <button 
             onClick={() => setActiveTab('theme')}
             className={`flex-1 py-3 text-center border-b-2 transition-colors ${activeTab === 'theme' ? 'border-[#00FF41] text-white bg-[#121212]' : 'border-transparent text-neutral-400 hover:text-white'}`}
           >
-            02_STYLE
+            STYLE
           </button>
           <button 
             onClick={() => setActiveTab('sections')}
             className={`flex-1 py-3 text-center border-b-2 transition-colors ${activeTab === 'sections' ? 'border-[#00FF41] text-white bg-[#121212]' : 'border-transparent text-neutral-400 hover:text-white'}`}
           >
-            03_LAYOUT
+            LAYOUT
+          </button>
+          <button 
+            onClick={() => setActiveTab('supabase')}
+            className={`flex-1 py-3 text-center border-b-2 transition-colors text-amber-400 font-bold ${activeTab === 'supabase' ? 'border-[#00FF41] bg-[#121212]' : 'border-transparent text-neutral-400 hover:text-white'}`}
+            title="Supabase Database Management"
+          >
+            DATABASE
           </button>
           <button 
             onClick={() => setActiveTab('history')}
-            className={`flex-1 py-2.5 text-center border-b-2 transition-colors relative ${activeTab === 'history' ? 'border-[#00FF41] text-white bg-[#121212]' : 'border-transparent text-neutral-400 hover:text-white'}`}
+            className={`px-3 py-2.5 text-center border-b-2 transition-colors relative ${activeTab === 'history' ? 'border-[#00FF41] text-white bg-[#121212]' : 'border-transparent text-neutral-400 hover:text-white'}`}
             title="Generation History"
           >
             <History className="w-3.5 h-3.5 mx-auto" />
@@ -960,6 +1565,123 @@ export default function App() {
             </div>
           )}
 
+          {/* TAB 4: SUPABASE BACKEND PANEL */}
+          {activeTab === 'supabase' && (
+            <div className="space-y-5">
+              <div className="space-y-1">
+                <label className="block text-[11px] uppercase tracking-wider text-neutral-400 font-mono">
+                  [01] Back-End Sync Status
+                </label>
+                <div className="p-4 rounded-xl bg-green-950/20 border border-green-500/30 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-green-400 animate-pulse"></span>
+                    <h3 className="font-bold text-xs text-green-400 font-mono">SUPABASE CONNECTED</h3>
+                  </div>
+                  <p className="text-[10px] text-neutral-400 font-mono leading-tight break-all">
+                    Project ID: prj_i17xF2aGzqoKS3...<br/>
+                    URL: https://vhcpbtclheayxdqfwqlu.supabase.co
+                  </p>
+                </div>
+              </div>
+
+              {/* LIVE MONITOR STATS */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="block text-[11px] uppercase tracking-wider text-neutral-400 font-mono">
+                    [02] Live Counters Monitor
+                  </label>
+                  <button 
+                    type="button" 
+                    onClick={fetchSupabaseStats} 
+                    disabled={isStatsLoading}
+                    className="text-[9px] hover:text-[#00FF41] font-mono flex items-center gap-1 transition-colors border border-neutral-800 rounded px-1.5 py-0.5 bg-neutral-900"
+                  >
+                    <RefreshCw className={`w-2 h-2 ${isStatsLoading ? 'animate-spin' : ''}`} />
+                    Refresh
+                  </button>
+                </div>
+
+                {statsError ? (
+                  <div className="p-3 rounded-lg bg-yellow-950/20 border border-yellow-500/30 text-[10px] text-yellow-500 font-mono leading-normal">
+                    <Info className="w-3.5 h-3.5 inline mr-1.5 shrink-0 align-text-bottom text-amber-500" />
+                    {statsError}
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-2 font-mono">
+                    <div className="p-3 bg-[#111] border border-[#222] rounded-lg">
+                      <span className="text-[9px] text-neutral-500 block uppercase">Profiles</span>
+                      <span className="text-lg font-bold text-white block mt-0.5">{dbStats.users}</span>
+                      <span className="text-[8px] text-[#00FF41] mt-1 block">Live Row sync</span>
+                    </div>
+                    <div className="p-3 bg-[#111] border border-[#222] rounded-lg">
+                      <span className="text-[9px] text-neutral-500 block uppercase">Transactions</span>
+                      <span className="text-lg font-bold text-white block mt-0.5">{dbStats.orders}</span>
+                      <span className="text-[8px] text-[#00FF41] mt-1 block">Checkout log</span>
+                    </div>
+                    <div className="p-3 bg-[#111] border border-[#222] rounded-lg">
+                      <span className="text-[9px] text-neutral-500 block uppercase">Cart Items</span>
+                      <span className="text-lg font-bold text-white block mt-0.5">{dbStats.cart}</span>
+                      <span className="text-[8px] text-[#00FF41] mt-1 block">Active digital</span>
+                    </div>
+                    <div className="p-3 bg-[#111] border border-[#222] rounded-lg">
+                      <span className="text-[9px] text-neutral-500 block uppercase">Form Leads</span>
+                      <span className="text-lg font-bold text-white block mt-0.5">{dbStats.forms}</span>
+                      <span className="text-[8px] text-[#00FF41] mt-1 block">Contact box</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* SIMULATION CONTROLS */}
+              <div className="space-y-1.5 bg-[#121212] p-4 rounded-xl border border-[#222]">
+                <div className="flex items-center gap-1.5 text-neutral-300 font-bold text-[11px] uppercase font-mono mb-1">
+                  <Database className="w-3.5 h-3.5 text-amber-500" />
+                  Simulation Toolbox
+                </div>
+                <p className="text-[10px] text-neutral-400 leading-normal mb-3 font-sans">
+                  Instantly trigger an API submission to the Supabase database without touching the frontend live forms!
+                </p>
+                <button
+                  type="button"
+                  onClick={triggerDevSubmissionsSimulate}
+                  disabled={isStatsLoading}
+                  className="w-full bg-amber-500 hover:bg-amber-600 text-black font-mono font-bold text-[10px] py-2 rounded uppercase flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Simulate Form Submission
+                </button>
+              </div>
+
+              {/* SQL SCHEMAS */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="block text-[11px] uppercase tracking-wider text-neutral-400 font-mono">
+                    [03] SQL DDL Blueprint Setup
+                  </label>
+                  <button 
+                    type="button" 
+                    onClick={() => {
+                      navigator.clipboard.writeText(SQL_SCHEMA_BLUEPRINT);
+                      setIsSchemaCopied(true);
+                      setTimeout(() => setIsSchemaCopied(false), 2000);
+                    }}
+                    className="text-[9px] text-[#00FF41] hover:underline font-mono flex items-center gap-1 cursor-pointer"
+                  >
+                    {isSchemaCopied ? "COPIED" : "COPY SQL"}
+                  </button>
+                </div>
+                <div className="p-3 rounded-lg bg-[#0e0e0e] border border-[#222] overflow-hidden">
+                  <p className="text-[10.5px] text-neutral-400 leading-normal mb-2 font-sans">
+                    Execute this complete blueprint in your <span className="text-white font-bold">Supabase SQL Editor</span> to initialize all four required database tables safely:
+                  </p>
+                  <pre className="text-[9px] text-zinc-400/80 font-mono h-40 overflow-y-auto bg-black p-2 rounded border border-[#1b1b1b] select-all">
+                    {SQL_SCHEMA_BLUEPRINT}
+                  </pre>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* TAB 4: GENERATION HISTORY */}
           {activeTab === 'history' && (
             <div className="space-y-4">
@@ -1253,12 +1975,64 @@ export default function App() {
                     ))}
                   </div>
 
-                  <span 
-                    className="px-4 py-2 rounded-lg text-xs font-bold transition-all select-none hover:scale-105"
-                    style={{ backgroundColor: website.theme.accentColor, color: '#ffffff' }}
-                  >
-                    {website.buttonText}
-                  </span>
+                  <div className="flex items-center gap-3">
+                    {/* DIGITAL SHOPPING CART RECEPTACLE BUTTON */}
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        setIsPortalOpen(true);
+                        setPortalTab('cart');
+                      }}
+                      className="relative p-2 rounded-full hover:opacity-80 transition-all cursor-pointer flex items-center justify-center border text-xs"
+                      style={{ 
+                        borderColor: `${website.theme.textColor}1a`, 
+                        color: website.theme.textColor,
+                        backgroundColor: `${website.theme.primaryColor}0d` 
+                      }}
+                      title="Digital Shopping Cart"
+                    >
+                      <ShoppingCart className="w-3.5 h-3.5" />
+                      {userCart.length > 0 && (
+                        <span className="absolute -top-1.5 -right-1.5 w-4.5 h-4.5 rounded-full text-[9px] font-mono font-bold text-white flex items-center justify-center animate-bounce shadow-md" style={{ backgroundColor: website.theme.accentColor }}>
+                          {userCart.reduce((acc, current) => acc + current.quantity, 0)}
+                        </span>
+                      )}
+                    </button>
+
+                    {/* CLIENT PROFILE PORTAL BUTTON */}
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        setIsPortalOpen(true);
+                        setPortalTab(dbUser ? 'profile' : 'auth');
+                      }}
+                      className="p-2 rounded-full hover:opacity-80 transition-all cursor-pointer flex items-center justify-center border text-xs"
+                      style={{ 
+                        borderColor: `${website.theme.textColor}1a`, 
+                        color: website.theme.textColor,
+                        backgroundColor: `${website.theme.primaryColor}0d` 
+                      }}
+                      title={dbUser ? `Logged In: ${dbUser.email}` : "Client Portal Security Center"}
+                    >
+                      <User className="w-3.5 h-3.5" />
+                      {dbUser && (
+                        <span className="w-1.5 h-1.5 rounded-full bg-green-400 absolute md:relative md:ml-1 mt-1 md:mt-0"></span>
+                      )}
+                    </button>
+
+                    {/* ORIGINAL CALL TO ACTION FOR THE ENHANCED LAYOUT */}
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        setIsPortalOpen(true);
+                        setPortalTab('auth');
+                      }}
+                      className="px-4 py-2 rounded-lg text-[10px] font-bold tracking-wider uppercase transition-all select-none hover:scale-105 cursor-pointer block"
+                      style={{ backgroundColor: website.theme.accentColor, color: '#ffffff' }}
+                    >
+                      {website.buttonText}
+                    </button>
+                  </div>
                 </nav>
 
                 {/* WEBSITE RENDERED DYNAMIC CONTENT BLOCKS */}
@@ -1482,6 +2256,16 @@ export default function App() {
                                         rows={3}
                                         className="w-full bg-transparent text-xs opacity-75 resize-none border-none p-0 focus:ring-1 focus:outline-none leading-relaxed"
                                       />
+                                      
+                                      <button 
+                                        type="button"
+                                        onClick={() => handleAddToCart({ id: item.id, title: item.title, price: item.price || '$39' })}
+                                        className="mt-3.5 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-[9px] font-mono font-bold text-white transition-opacity hover:opacity-90 cursor-pointer w-fit"
+                                        style={{ backgroundColor: website.theme.accentColor }}
+                                      >
+                                        <ShoppingCart className="w-3 h-3" />
+                                        ADD_TO_CART ({item.price || '$39'})
+                                      </button>
                                       
                                       {/* Mini delete service button */}
                                       <button 
@@ -1796,13 +2580,16 @@ export default function App() {
                                       </div>
 
                                       <button 
-                                        className="w-full py-2.5 rounded-xl font-bold font-mono text-[10px] uppercase tracking-wider mt-6 transition-all hover:opacity-95"
+                                        type="button"
+                                        onClick={() => handleAddToCart({ id: item.id, title: `${website.name} - ${item.title}`, price: item.price || '$49' })}
+                                        className="w-full py-2.5 rounded-xl font-bold font-mono text-[10px] uppercase tracking-wider mt-6 transition-all hover:opacity-95 cursor-pointer flex items-center justify-center gap-1.5"
                                         style={{ 
                                           backgroundColor: isPopular ? website.theme.accentColor : `${website.theme.textColor}1a`,
                                           color: isPopular ? '#ffffff' : website.theme.textColor
                                         }}
                                       >
-                                        CHOOSE_TIER
+                                        <ShoppingCart className="w-3.5 h-3.5" />
+                                        ADD TO CART ({item.price || '$49'})
                                       </button>
 
                                       {/* Mini remove tier */}
@@ -1991,19 +2778,59 @@ export default function App() {
                                 </div>
                               </div>
 
-                              <form className="md:col-span-7 p-6 border rounded-2xl space-y-3" style={{ borderColor: `${website.theme.primaryColor}15` }} onSubmit={(e) => e.preventDefault()}>
+                              <form 
+                                className="md:col-span-7 p-6 border rounded-2xl space-y-3" 
+                                style={{ borderColor: `${website.theme.primaryColor}25` }} 
+                                onSubmit={handleSubmitContactForm}
+                              >
+                                {contactSuccessMsg && (
+                                  <div className="p-2.5 rounded text-[10px] font-mono select-none leading-normal" style={{ backgroundColor: `${website.theme.accentColor}1A`, color: website.theme.accentColor }}>
+                                    {contactSuccessMsg}
+                                  </div>
+                                )}
                                 <div className="grid grid-cols-2 gap-3">
                                   <div>
                                     <label className="block text-[8px] font-mono uppercase tracking-wider mb-1 opacity-60">Full Name</label>
-                                    <input type="text" placeholder="John Doe" disabled className="w-full px-3 py-2 rounded border text-xs focus:ring-1" style={{ borderColor: `${website.theme.primaryColor}1a`, backgroundColor: website.theme.backgroundColor === '#ffffff' ? '#ffffff' : '#141824' }} />
+                                    <input 
+                                      type="text" 
+                                      placeholder="John Doe" 
+                                      required
+                                      value={contactName}
+                                      onChange={(e) => setContactName(e.target.value)}
+                                      className="w-full px-3 py-2 rounded border text-xs focus:ring-1" 
+                                      style={{ borderColor: `${website.theme.primaryColor}1a`, backgroundColor: website.theme.backgroundColor === '#ffffff' ? '#ffffff' : '#141824', color: website.theme.textColor }} 
+                                    />
                                   </div>
                                   <div>
                                     <label className="block text-[8px] font-mono uppercase tracking-wider mb-1 opacity-60">Recipient Mail</label>
-                                    <input type="email" placeholder="john@example.com" disabled className="w-full px-3 py-2 rounded border text-xs focus:ring-1" style={{ borderColor: `${website.theme.primaryColor}1a`, backgroundColor: website.theme.backgroundColor === '#ffffff' ? '#ffffff' : '#141824' }} />
+                                    <input 
+                                      type="email" 
+                                      placeholder="john@example.com" 
+                                      required
+                                      value={contactEmail}
+                                      onChange={(e) => setContactEmail(e.target.value)}
+                                      className="w-full px-3 py-2 rounded border text-xs focus:ring-1" 
+                                      style={{ borderColor: `${website.theme.primaryColor}1a`, backgroundColor: website.theme.backgroundColor === '#ffffff' ? '#ffffff' : '#141824', color: website.theme.textColor }} 
+                                    />
                                   </div>
                                 </div>
-                                <button type="button" className="w-full py-2 bg-[#0A0A0A] hover:bg-neutral-800 text-white font-mono font-bold text-[10px] rounded uppercase mt-2 select-text pointer-events-none">
-                                  Submit Inquiry Form (Ready)
+                                <div>
+                                  <label className="block text-[8px] font-mono uppercase tracking-wider mb-1 opacity-60">Inquiry Message</label>
+                                  <textarea 
+                                    placeholder="Tell us about your requirements..." 
+                                    value={contactMessage}
+                                    rows={2}
+                                    onChange={(e) => setContactMessage(e.target.value)}
+                                    className="w-full px-3 py-2 rounded border text-xs focus:ring-1 resize-none" 
+                                    style={{ borderColor: `${website.theme.primaryColor}1a`, backgroundColor: website.theme.backgroundColor === '#ffffff' ? '#ffffff' : '#141824', color: website.theme.textColor }} 
+                                  />
+                                </div>
+                                <button 
+                                  type="submit" 
+                                  disabled={isSubmittingContact}
+                                  className="w-full py-2 bg-[#0A0A0A] hover:bg-neutral-800 text-white font-mono font-bold text-[10px] rounded uppercase mt-2 select-text cursor-pointer transition-colors"
+                                >
+                                  {isSubmittingContact ? "SUBMITTING TO SUPABASE..." : "Send Database Inquiry (Secure)"}
                                 </button>
                               </form>
                             </div>
@@ -2070,6 +2897,412 @@ export default function App() {
                   </div>
                 </footer>
 
+                {/* INTERACTIVE CUSTOMER CLIENT PORTAL PANEL */}
+                {isPortalOpen && (
+                  <div 
+                    className="absolute top-0 right-0 h-full w-[360px] max-w-full bg-[#0E131F] text-zinc-100 z-50 flex flex-col border-l shadow-2xl animate-in slide-in-from-right duration-300 select-none pb-4"
+                    style={{ borderColor: `${website.theme.accentColor}30`, fontFamily: `'Inter', sans-serif` }}
+                  >
+                    {/* PANEL HEADER */}
+                    <div className="p-4 border-b border-zinc-800 flex items-center justify-between bg-[#121929]">
+                      <div className="flex items-center gap-2">
+                        <ShoppingBag className="w-4 h-4 text-amber-500" />
+                        <div>
+                          <h3 className="font-extrabold text-xs tracking-wider uppercase text-white font-mono">{website.name} Portal</h3>
+                          <span className="text-[9px] font-mono text-zinc-500 uppercase block tracking-wider">Secured via Supabase</span>
+                        </div>
+                      </div>
+                      <button 
+                        type="button" 
+                        onClick={() => {
+                          setIsPortalOpen(false);
+                          setAuthMessage(null);
+                          setAuthError(null);
+                        }}
+                        className="p-1 rounded-full hover:bg-zinc-800 text-zinc-400 hover:text-white cursor-pointer transition-colors"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    {/* STATUS TOAST BANNER */}
+                    {(authMessage || authError) && (
+                      <div className="p-3 border-b border-zinc-805 text-[10.5px] leading-relaxed select-none">
+                        {authMessage && (
+                          <div className="p-2.5 rounded bg-green-500/10 text-green-400 border border-green-500/20 font-mono">
+                            <CheckCircle className="w-3.5 h-3.5 inline mr-1.5 shrink-0 align-text-bottom" />
+                            {authMessage}
+                          </div>
+                        )}
+                        {authError && (
+                          <div className="p-2.5 rounded bg-red-500/10 text-red-400 border border-red-500/20 font-mono">
+                            <Info className="w-3.5 h-3.5 inline mr-1.5 shrink-0 align-text-bottom" />
+                            {authError}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* PORTAL NAVIGATIONAL TABS */}
+                    <div className="flex bg-[#0A0D14] border-b border-zinc-800 text-[10px] font-mono uppercase font-bold select-none divide-x divide-zinc-850">
+                      <button 
+                        type="button"
+                        onClick={() => { setPortalTab('cart'); setAuthError(null); setAuthMessage(null); }}
+                        className={`flex-1 py-3 text-center transition-colors cursor-pointer ${portalTab === 'cart' ? 'bg-[#121929] text-white font-black' : 'text-zinc-500 hover:text-zinc-300'}`}
+                      >
+                        Cart ({userCart.length})
+                      </button>
+                      <button 
+                        type="button"
+                        onClick={() => { setPortalTab(dbUser ? 'profile' : 'auth'); setAuthError(null); setAuthMessage(null); }}
+                        className={`flex-1 py-3 text-center transition-colors cursor-pointer ${portalTab === 'profile' || portalTab === 'auth' ? 'bg-[#121929] text-white font-black' : 'text-zinc-500 hover:text-zinc-300'}`}
+                      >
+                        Profile
+                      </button>
+                      <button 
+                        type="button"
+                        onClick={() => { setPortalTab('orders'); setAuthError(null); setAuthMessage(null); }}
+                        className={`flex-1 py-3 text-center transition-colors cursor-pointer ${portalTab === 'orders' ? 'bg-[#121929] text-white font-black' : 'text-zinc-500 hover:text-zinc-300'}`}
+                      >
+                        Orders ({userOrders.length})
+                      </button>
+                    </div>
+
+                    {/* TAB VIEWS CONTAINER */}
+                    <div className="flex-1 overflow-y-auto p-4 space-y-4">
+
+                      {/* 1. DIGITAL SHOPPERS CART */}
+                      {portalTab === 'cart' && (
+                        <div className="space-y-4 h-full flex flex-col justify-between">
+                          {userCart.length === 0 ? (
+                            <div className="text-center py-12 space-y-3 my-auto">
+                              <ShoppingCart className="w-8 h-8 text-zinc-600 mx-auto opacity-70" />
+                              <h4 className="font-bold text-xs text-zinc-300">Your Cart is Currently Empty</h4>
+                              <p className="text-[10px] text-zinc-500 max-w-xs mx-auto leading-relaxed">
+                                Add items to your cart by clicking the "Add to Cart" or "Choose Plan" buttons on services/pricing lists inside the website landing page preview area!
+                              </p>
+                            </div>
+                          ) : (
+                            <div className="space-y-3 flex-1 overflow-y-auto">
+                              <label className="block text-[10px] font-mono text-zinc-500 uppercase tracking-wider">Current Selections</label>
+                              <div className="space-y-2">
+                                {userCart.map((item) => {
+                                  return (
+                                    <div key={item.id} className="p-3 bg-[#111622] rounded-lg border border-zinc-800/80 flex items-center justify-between gap-2">
+                                      <div className="truncate pr-1">
+                                        <h4 className="font-bold text-xs text-white truncate text-left">{item.title}</h4>
+                                        <span className="text-[10px] font-mono text-zinc-400 block mt-0.5 text-left" style={{ color: website.theme.accentColor }}>{item.price} each</span>
+                                      </div>
+                                      <div className="flex items-center gap-2 shrink-0">
+                                        <div className="flex bg-[#0A0D14] border border-zinc-800 rounded overflow-hidden text-[10px] font-mono">
+                                          <button 
+                                            type="button" 
+                                            onClick={() => handleUpdateCartQuantity(item.id, item.quantity - 1)}
+                                            className="px-1.5 py-0.5 hover:bg-zinc-800 text-zinc-400 cursor-pointer"
+                                          >-</button>
+                                          <span className="px-2 py-0.5 text-white">{item.quantity}</span>
+                                          <button 
+                                            type="button" 
+                                            onClick={() => handleUpdateCartQuantity(item.id, item.quantity + 1)}
+                                            className="px-1.5 py-0.5 hover:bg-zinc-800 text-zinc-400 cursor-pointer"
+                                          >+</button>
+                                        </div>
+                                        <button 
+                                          type="button" 
+                                          onClick={() => handleRemoveFromCart(item.id)}
+                                          className="text-red-500 hover:text-red-400 p-1 rounded hover:bg-red-950/20 cursor-pointer"
+                                          title="Remove"
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+
+                              <div className="p-3.5 bg-[#0a0d14] rounded-xl border border-zinc-800 space-y-2.5 mt-4 text-xs font-mono">
+                                <div className="flex justify-between">
+                                  <span className="text-zinc-500">Subtotal:</span>
+                                  <span className="text-zinc-300">
+                                    ${userCart.reduce((sum, item) => sum + ((parseFloat(item.price.replace(/[^\d.]/g, '')) || 39) * item.quantity), 0).toFixed(2)}
+                                  </span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-zinc-500">Fulfillment:</span>
+                                  <span className="text-[10px] text-zinc-400">Secure Digital Delivery</span>
+                                </div>
+                                <div className="h-px bg-zinc-800 my-1"></div>
+                                <div className="flex justify-between text-white font-bold font-sans text-sm">
+                                  <span>Total Price:</span>
+                                  <span style={{ color: website.theme.accentColor }}>
+                                    ${userCart.reduce((sum, item) => sum + ((parseFloat(item.price.replace(/[^\d.]/g, '')) || 39) * item.quantity), 0).toFixed(2)}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {/* Checkout actions */}
+                              <div className="space-y-2 pt-2">
+                                {!dbUser && (
+                                  <p className="text-[9.5px] text-zinc-500 leading-normal text-center italic font-sans mb-1">
+                                    * Checkout as Guest will process order immediately but won't record in user account dashboard profiles.
+                                  </p>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={handlePlaceOrder}
+                                  disabled={isAuthLoading}
+                                  className="w-full py-2.5 hover:opacity-90 text-black font-extrabold text-xs tracking-wider rounded-lg uppercase cursor-pointer flex items-center justify-center gap-1.5"
+                                  style={{ backgroundColor: website.theme.accentColor }}
+                                >
+                                  {isAuthLoading ? "Processing Checkout..." : "🛒 Complete Checkout"}
+                                </button>
+                                
+                                {!dbUser && (
+                                  <button
+                                    type="button"
+                                    onClick={() => { setPortalTab('auth'); }}
+                                    className="w-full text-center py-2 text-zinc-400 hover:text-white border border-zinc-800 rounded-lg text-[10px] font-mono uppercase cursor-pointer bg-[#0A0D14]"
+                                  >
+                                    Sign In First to Log Order
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* 2. AUTHENTICATION (LOGIN/SIGNUP) */}
+                      {portalTab === 'auth' && (
+                        <div className="space-y-4">
+                          {dbUser ? (
+                            <div className="p-4 bg-zinc-90 w-full rounded-xl border border-zinc-850 space-y-3">
+                              <div className="flex items-center gap-2">
+                                <User className="w-5 h-5 text-amber-500" />
+                                <div className="text-left">
+                                  <h4 className="font-bold text-xs text-white">Authenticated Session</h4>
+                                  <span className="text-[10px] text-zinc-500 font-mono truncate block max-w-[200px]">{dbUser.email}</span>
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={handleSignOut}
+                                className="w-full py-2 border border-red-500/40 text-red-00 hover:bg-red-950/20 rounded font-mono text-[10px] uppercase cursor-pointer"
+                              >
+                                Sign Out safely
+                              </button>
+                            </div>
+                          ) : (
+                            <form onSubmit={isSignUp ? handleSignUp : handleSignIn} className="space-y-3 text-xs text-left">
+                              <h4 className="font-mono text-[11px] font-bold text-zinc-300 uppercase tracking-wider block border-b border-zinc-800 pb-1">
+                                {isSignUp ? "Register Account" : "Access Customer Space"}
+                              </h4>
+                              
+                              {isSignUp && (
+                                <div className="space-y-1">
+                                  <label className="block text-[9px] font-mono uppercase text-zinc-500">Your Full Name</label>
+                                  <input 
+                                    type="text" 
+                                    required
+                                    placeholder="Jane Doe" 
+                                    value={authFullName}
+                                    onChange={(e) => setAuthFullName(e.target.value)}
+                                    className="w-full p-2 rounded bg-[#090C15] border border-zinc-800 focus:ring-1 focus:outline-none text-zinc-100" 
+                                  />
+                                </div>
+                              )}
+
+                              <div className="space-y-1">
+                                <label className="block text-[9px] font-mono uppercase text-zinc-500">Email Address</label>
+                                <input 
+                                  type="email" 
+                                  required
+                                  placeholder="customer@example.com" 
+                                  value={authEmail}
+                                  onChange={(e) => setAuthEmail(e.target.value)}
+                                  className="w-full p-2 rounded bg-[#090C15] border border-zinc-800 focus:ring-1 focus:outline-none text-zinc-100" 
+                                />
+                              </div>
+
+                              <div className="space-y-1">
+                                <label className="block text-[9px] font-mono uppercase text-zinc-500">Secret Password</label>
+                                <input 
+                                  type="password" 
+                                  required
+                                  placeholder="••••••••" 
+                                  value={authPassword}
+                                  onChange={(e) => setAuthPassword(e.target.value)}
+                                  className="w-full p-2 rounded bg-[#090C15] border border-zinc-800 focus:ring-1 focus:outline-none text-zinc-100" 
+                                />
+                              </div>
+
+                              {isSignUp && (
+                                <>
+                                  <div className="space-y-1">
+                                    <label className="block text-[9px] font-mono uppercase text-zinc-500">Contact Number</label>
+                                    <input 
+                                      type="text" 
+                                      placeholder="+1 (555) 0192-2384" 
+                                      value={authPhone}
+                                      onChange={(e) => setAuthPhone(e.target.value)}
+                                      className="w-full p-2 rounded bg-[#090C15] border border-zinc-800 text-zinc-100" 
+                                    />
+                                  </div>
+                                  <div className="space-y-1">
+                                    <label className="block text-[9px] font-mono uppercase text-zinc-500">Delivery Address</label>
+                                    <input 
+                                      type="text" 
+                                      placeholder="123 Ocean Drive, Suite 10" 
+                                      value={authAddress}
+                                      onChange={(e) => setAuthAddress(e.target.value)}
+                                      className="w-full p-2 rounded bg-[#090C15] border border-zinc-800 text-zinc-100" 
+                                    />
+                                  </div>
+                                </>
+                              )}
+
+                              <button 
+                                type="submit" 
+                                disabled={isAuthLoading}
+                                className="w-full py-2 bg-zinc-100 hover:bg-white text-[#0E131F] font-bold uppercase rounded cursor-pointer transition-all tracking-wider text-[10px] font-mono mt-3"
+                              >
+                                {isAuthLoading ? "Authenticating securely..." : (isSignUp ? "🚀 Secure Signup" : "🔑 Secure Sign In")}
+                              </button>
+
+                              <button 
+                                type="button"
+                                onClick={() => { setIsSignUp(!isSignUp); setAuthError(null); setAuthMessage(null); }}
+                                className="w-full text-center text-[10px] text-zinc-500 hover:text-zinc-200 block underline mt-2 cursor-pointer font-sans"
+                              >
+                                {isSignUp ? "Already have account? Sign In" : "Don't have account? Register"}
+                              </button>
+                            </form>
+                          )}
+                        </div>
+                      )}
+
+                      {/* 3. PROFILE DETAILS */}
+                      {portalTab === 'profile' && (
+                        <div className="space-y-4">
+                          {!dbUser ? (
+                            <div className="text-center py-10 space-y-4">
+                              <Shield className="w-6 h-6 text-zinc-500 mx-auto" />
+                              <h4 className="font-bold text-xs text-zinc-300">Profile Lock Enabled</h4>
+                              <p className="text-[10px] text-zinc-500 max-w-xs mx-auto">Please Sign In under the Profile tab to access and manage your customer account details.</p>
+                              <button 
+                                type="button" 
+                                onClick={() => setPortalTab('auth')}
+                                className="px-3 py-1.5 bg-[#121929] hover:bg-zinc-800 text-white rounded text-[10px] font-mono uppercase cursor-pointer"
+                              >Activate Login</button>
+                            </div>
+                          ) : (
+                            <form onSubmit={handleSaveProfile} className="space-y-3 text-xs text-left">
+                              <h4 className="font-mono text-[11px] font-bold text-zinc-300 uppercase tracking-wider block border-b border-zinc-800 pb-1">
+                                Customer Identity Profile
+                              </h4>
+                              <div className="space-y-1">
+                                <label className="block text-[9px] font-mono uppercase text-zinc-500">Primary Email</label>
+                                <input type="email" disabled value={dbUser.email || ''} className="w-full p-2 rounded bg-zinc-950 border border-zinc-850 opacity-40 cursor-not-allowed text-zinc-400" />
+                              </div>
+                              <div className="space-y-1">
+                                <label className="block text-[9px] font-mono uppercase text-zinc-500">Full Name</label>
+                                <input 
+                                  type="text" 
+                                  placeholder="Jane Smith" 
+                                  value={authFullName}
+                                  onChange={(e) => setAuthFullName(e.target.value)}
+                                  className="w-full p-2 rounded bg-[#090C15] border border-zinc-800 text-white" 
+                                />
+                              </div>
+                              <div className="space-y-1">
+                                <label className="block text-[9px] font-mono uppercase text-zinc-500">Contact Telephone</label>
+                                <input 
+                                  type="text" 
+                                  placeholder="+1 (202) 555-0143" 
+                                  value={authPhone}
+                                  onChange={(e) => setAuthPhone(e.target.value)}
+                                  className="w-full p-2 rounded bg-[#090C15] border border-zinc-800 text-white" 
+                                />
+                              </div>
+                              <div className="space-y-1">
+                                <label className="block text-[9px] font-mono uppercase text-zinc-500">Shipping/Delivery Destination</label>
+                                <input 
+                                  type="text" 
+                                  placeholder="450 Golden Gate Avenue, San Francisco" 
+                                  value={authAddress}
+                                  onChange={(e) => setAuthAddress(e.target.value)}
+                                  className="w-full p-2 rounded bg-[#090C15] border border-zinc-800 text-white" 
+                                />
+                              </div>
+                              <button 
+                                type="submit" 
+                                disabled={isAuthLoading}
+                                className="w-full py-2 bg-zinc-100 hover:bg-zinc-200 text-neutral-900 font-bold uppercase rounded cursor-pointer tracking-wider text-[10px] font-mono mt-2"
+                              >
+                                {isAuthLoading ? "Saving securely..." : "💾 Update Profile Details"}
+                              </button>
+                            </form>
+                          )}
+                        </div>
+                      )}
+
+                      {/* 4. ORDERS HISTORY SCREEN */}
+                      {portalTab === 'orders' && (
+                        <div className="space-y-4">
+                          {!dbUser ? (
+                            <div className="text-center py-10 space-y-4">
+                              <Shield className="w-6 h-6 text-zinc-500 mx-auto" />
+                              <h4 className="font-bold text-xs text-zinc-300">Authentication Required</h4>
+                              <p className="text-[10px] text-zinc-500 max-w-xs mx-auto">Order history is restricted to authenticated user accounts. Please register or sign in.</p>
+                              <button 
+                                type="button" 
+                                onClick={() => setPortalTab('auth')}
+                                className="px-3 py-1.5 bg-[#121929] hover:bg-zinc-800 text-white rounded text-[10px] font-mono uppercase cursor-pointer"
+                              >Sign In Now</button>
+                            </div>
+                          ) : userOrders.length === 0 ? (
+                            <div className="text-center py-12 space-y-2 my-auto">
+                              <History className="w-8 h-8 text-zinc-600 mx-auto opacity-70" />
+                              <h4 className="font-bold text-xs text-zinc-300">No Orders Logged Yet</h4>
+                              <p className="text-[10px] text-zinc-500 max-w-xs mx-auto leading-relaxed">
+                                You haven't placed any orders with this account yet. Add items to your Cart and check out!
+                              </p>
+                            </div>
+                          ) : (
+                            <div className="space-y-3">
+                              <label className="block text-[10px] font-mono text-zinc-500 uppercase tracking-wider">Purchase History Logs</label>
+                              <div className="space-y-2.5 max-h-[380px] overflow-y-auto pr-1">
+                                {userOrders.map((ord) => (
+                                  <div key={ord.id} className="p-3 bg-[#111622] rounded-lg border border-zinc-800 space-y-2 text-[11px] text-left">
+                                    <div className="flex justify-between items-center text-[10px] font-mono">
+                                      <span className="text-[#00FF41] font-bold">ORD_{ord.id.substring(0,6).toUpperCase()}</span>
+                                      <span className="text-zinc-500">{new Date(ord.created_at).toLocaleDateString()}</span>
+                                    </div>
+                                    <div className="space-y-1">
+                                      {ord.items?.map((p: any, pIdx: number) => (
+                                        <div key={pIdx} className="flex justify-between text-zinc-300 text-[10.5px]">
+                                          <span className="truncate max-w-[150px]">{p.title} <span className="text-zinc-500 font-mono text-[10px]">x{p.quantity}</span></span>
+                                          <span className="font-semibold text-zinc-400">{p.price}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                    <div className="h-px bg-zinc-800"></div>
+                                    <div className="flex justify-between items-center text-xs">
+                                      <span className="text-[10px] text-zinc-500 font-mono font-bold uppercase">Status: <span className="text-amber-500 font-mono">{ord.status}</span></span>
+                                      <span className="font-bold text-white">${ord.total_price ? parseFloat(ord.total_price).toFixed(2) : '39.00'}</span>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                    </div>
+                  </div>
+                )}
               </div>
 
             </div>
