@@ -11,12 +11,12 @@ let aiClient: GoogleGenAI | null = null;
 
 function getGeminiClient() {
   if (!aiClient) {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY;AQ.Ab8RN6KDjAbX65dUf8DBg8Sm6rZOVJ3l-yoyAeTBeCIxb6GHkg
     if (!apiKey) {
       throw new Error("GEMINI_API_KEY is not defined. Please add it to your Secrets under Settings.");
     }
     aiClient = new GoogleGenAI({
-      apiKey: apiKey,
+      apiKey: apiKey,AQ.Ab8RN6KDjAbX65dUf8DBg8Sm6rZOVJ3l-yoyAeTBeCIxb6GHkg
       httpOptions: {
         headers: {
           "User-Agent": "aistudio-build",
