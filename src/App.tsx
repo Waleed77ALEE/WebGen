@@ -56,7 +56,8 @@ import {
 } from 'lucide-react';
 import { GeneratedWebsite, WebsiteSection, SectionItem, SectionType, WebsiteTheme } from './types';
 import { generateFullHTML } from './utils/exporter';
-import { supabase, SQL_SCHEMA_BLUEPRINT } from './utils/supabase';
+import { supabase, SQL_SCHEMA_BLUEPRINT, supabaseUrl } from './utils/supabase';
+import { SupabaseAuthPortal } from './components/SupabaseAuthPortal';
 
 // Custom Map for rendering correct Lucide components based on string names
 const iconMap: Record<string, React.ComponentType<any>> = {
@@ -221,6 +222,7 @@ export default function App() {
   const [customInstructions, setCustomInstructions] = useState('');
 
   // App control states
+  const [displayRoute, setDisplayRoute] = useState<'workspace' | 'security-portal'>('security-portal');
   const [activeTab, setActiveTab] = useState<'generate' | 'theme' | 'sections' | 'supabase' | 'history'>('generate');
   const [viewMode, setViewMode] = useState<'desktop' | 'mobile' | 'code'>('desktop');
   const [selectedSectionId, setSelectedSectionId] = useState<string | null>(null);
@@ -1142,6 +1144,40 @@ export default function App() {
     document.body.removeChild(element);
   };
 
+  if (displayRoute === 'security-portal') {
+    return (
+      <SupabaseAuthPortal
+        dbUser={dbUser}
+        dbProfile={dbProfile}
+        userOrders={userOrders}
+        userCart={userCart}
+        isAuthLoading={isAuthLoading}
+        authError={authError}
+        authMessage={authMessage}
+        setAuthError={setAuthError}
+        setAuthMessage={setAuthMessage}
+        onSignUp={handleSignUp}
+        onSignIn={handleSignIn}
+        onSignOut={handleSignOut}
+        onEnterWorkspace={() => setDisplayRoute('workspace')}
+        authEmail={authEmail}
+        setAuthEmail={setAuthEmail}
+        authPassword={authPassword}
+        setAuthPassword={setAuthPassword}
+        authFullName={authFullName}
+        setAuthFullName={setAuthFullName}
+        authPhone={authPhone}
+        setAuthPhone={setAuthPhone}
+        authAddress={authAddress}
+        setAuthAddress={setAuthAddress}
+        isSignUp={isSignUp}
+        setIsSignUp={setIsSignUp}
+        dbStats={dbStats}
+        fetchStats={fetchSupabaseStats}
+      />
+    );
+  }
+
   return (
     <div id="app-root" className="flex h-screen w-full bg-[#070707] text-[#E5E7EB] overflow-hidden font-sans">
       
@@ -1168,6 +1204,42 @@ export default function App() {
               Official Platform: <span className="text-[#00FF41] font-bold">AleeXstudio Developers</span>
             </span>
           </div>
+
+          {/* SUPABASE SECURE BADGE */}
+          <button
+            type="button"
+            onClick={() => setDisplayRoute('security-portal')}
+            className={`mt-2 flex items-center justify-between w-full px-3 py-2 rounded-lg border text-left cursor-pointer transition-all duration-200 select-none ${
+              dbUser 
+                ? 'bg-emerald-950/20 border-emerald-500/30 hover:bg-emerald-950/30' 
+                : 'bg-zinc-900 border-zinc-800 hover:border-zinc-700 hover:bg-zinc-800'
+            }`}
+          >
+            <div className="flex items-center gap-2 truncate">
+              {dbUser ? (
+                <div className="w-5 h-5 rounded-md bg-[#00FF41]/20 border border-[#00FF41]/40 flex items-center justify-center shrink-0">
+                  <User className="w-3 h-3 text-[#00FF41]" />
+                </div>
+              ) : (
+                <div className="w-5 h-5 rounded-md bg-zinc-800 border border-zinc-700 flex items-center justify-center shrink-0">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
+                </div>
+              )}
+              <div className="truncate text-left leading-none">
+                <p className="text-[10px] font-bold text-white tracking-wide">
+                  {dbUser ? (dbProfile?.full_name || 'Active Creator') : 'SUPABASE STATUS'}
+                </p>
+                <span className="text-[8.5px] font-mono text-zinc-500 truncate block">
+                  {dbUser ? dbUser.email : 'Click to Register & Sync Cloud'}
+                </span>
+              </div>
+            </div>
+            <span className={`text-[8.5px] font-mono font-bold px-1.5 py-0.5 rounded leading-none ${
+              dbUser ? 'bg-[#00FF41]/15 text-[#00FF41]' : 'bg-amber-400/10 text-amber-500'
+            }`}>
+              {dbUser ? 'SYNCED' : 'UNSYNCED'}
+            </span>
+          </button>
         </div>
 
         {/* WORKSPACE SECTIONS MENU */}
@@ -1578,8 +1650,8 @@ export default function App() {
                     <h3 className="font-bold text-xs text-green-400 font-mono">SUPABASE CONNECTED</h3>
                   </div>
                   <p className="text-[10px] text-neutral-400 font-mono leading-tight break-all">
-                    Project ID: prj_i17xF2aGzqoKS3...<br/>
-                    URL: https://vhcpbtclheayxdqfwqlu.supabase.co
+                    Project ID: {supabaseUrl.match(/https:\/\/([^.]+)\.supabase/)?.[1] || 'vhcpbtclheayxdqfwqlu'}<br/>
+                    URL: {supabaseUrl}
                   </p>
                 </div>
               </div>

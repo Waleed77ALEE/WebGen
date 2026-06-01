@@ -1,8 +1,12 @@
 import { createClient } from '@supabase/supabase-js';
 
 // Retrieve values from environment variables or use the user's explicit project credentials as a robust fallback
-const supabaseUrl = (import.meta as any).env?.VITE_SUPABASE_URL || 'https://vhcpbtclheayxdqfwqlu.supabase.co';
-const supabaseAnonKey = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || 'sb_publishable__iPE2DKQkv9f9DwNYYuUaQ_ybDGToGa';
+let rawUrl = (import.meta as any).env?.VITE_SUPABASE_URL || 'https://vhcpbtclheayxdqfwqlu.supabase.co';
+if (rawUrl) {
+  rawUrl = rawUrl.trim().replace(/\/rest\/v1\/?$/, '').replace(/\/$/, '');
+}
+export const supabaseUrl = rawUrl;
+export const supabaseAnonKey = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || 'sb_publishable__iPE2DKQkv9f9DwNYYuUaQ_ybDGToGa';
 
 /**
  * Shared Supabase Client instance for Auth, Firestore-like operations, Real-time listens, etc.
