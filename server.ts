@@ -85,6 +85,79 @@ function getGeminiClient() {
   return aiClient;
 }
 
+async function generateContentWithRetryAndFallback(params: {
+  contents: any;
+  config?: any;
+}): Promise<any> {
+  const client = getGeminiClient();
+  const modelsToTry = ["gemini-3.5-flash", "gemini-3.1-flash-lite"];
+  let lastError: any = null;
+
+  for (const model of modelsToTry) {
+    let attempts = 3;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        console.log(`[AI Sync] Attempting generateContent via ${model} (attempt ${attempt}/${attempts})...`);
+        const response = await client.models.generateContent({
+          model: model,
+          contents: params.contents,
+          config: params.config,
+        });
+
+        if (response && response.text) {
+          console.log(`[AI Sync] Generation successful using model ${model} on attempt ${attempt}.`);
+          return response;
+        }
+        throw new Error("Empty text response received from Gemini.");
+      } catch (err: any) {
+        lastError = err;
+        console.warn(`[AI Sync Warning] Attempt ${attempt} via ${model} failed:`, err.message || err);
+        if (attempt < attempts) {
+          const delay = attempt * 1000;
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
+    }
+  }
+
+  throw lastError || new Error("Failed to generate content after retries on multiple Gemini models.");
+}
+
+async function generateImageWithRetry(prompt: string): Promise<any> {
+  let lastError: any = null;
+  let attempts = 3;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      console.log(`[Image Generation Sync] Generating illustration (attempt ${attempt}/${attempts})...`);
+      const client = getGeminiClient();
+      const response = await client.models.generateContent({
+        model: "gemini-2.5-flash-image",
+        contents: {
+          parts: [
+            {
+              text: prompt,
+            },
+          ],
+        },
+        config: {
+          imageConfig: {
+            aspectRatio: "16:9",
+          },
+        },
+      });
+      return response;
+    } catch (err: any) {
+      lastError = err;
+      console.warn(`[Image Sync Warning] Attempt ${attempt} failed:`, err.message || err);
+      if (attempt < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+      }
+    }
+  }
+  throw lastError || new Error("Failed to generate image after retries.");
+}
+
 // Programmatic fallback builders in case all active AI quotas/keys are unavailable
 function getFallbackWebsite(
   category: string,
@@ -494,29 +567,11 @@ async function startServer() {
       try {
         if (isUsingOpenAI()) {
           console.log("Attempting OpenAI website generation...");
-          textOutput = await fetchOpenAI([{ role: "user", content: userPrompt }], systemInstruction);
-        } else {
-          console.log("Attempting Gemini website generation...");
-          const client = getGeminiClient();
-          const response = await client.models.generateContent({
-            model: "gemini-3.5-flash",
-            contents: userPrompt,
-            config: {
-              systemInstruction,
-              responseMimeType: "application/json",
-              responseSchema: websiteResponseSchema,
-            },
-          });
-          textOutput = response.text || "";
-        }
-      } catch (firstError: any) {
-        console.warn("First choice AI provider failed, trying backup provider...", firstError.message || firstError);
-        try {
-          if (isUsingOpenAI()) {
-            console.log("Falling back to Gemini models for website generation...");
-            const client = getGeminiClient();
-            const response = await client.models.generateContent({
-              model: "gemini-3.5-flash",
+          try {
+            textOutput = await fetchOpenAI([{ role: "user", content: userPrompt }], systemInstruction);
+          } catch (openaiErr: any) {
+            console.warn("OpenAI failed, falling back to robust Gemini retry wrapper...", openaiErr.message || openaiErr);
+            const response = await generateContentWithRetryAndFallback({
               contents: userPrompt,
               config: {
                 systemInstruction,
@@ -525,17 +580,30 @@ async function startServer() {
               },
             });
             textOutput = response.text || "";
-          } else {
+          }
+        } else {
+          console.log("Attempting robust Gemini website generation...");
+          try {
+            const response = await generateContentWithRetryAndFallback({
+              contents: userPrompt,
+              config: {
+                systemInstruction,
+                responseMimeType: "application/json",
+                responseSchema: websiteResponseSchema,
+              },
+            });
+            textOutput = response.text || "";
+          } catch (geminiErr: any) {
             if (process.env.OPENAI_API_KEY || (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.startsWith("sk-"))) {
-              console.log("Falling back to OpenAI model for website generation...");
+              console.log("Gemini failed after retries, falling back to OpenAI model...");
               textOutput = await fetchOpenAI([{ role: "user", content: userPrompt }], systemInstruction);
             } else {
-              throw new Error("No backup provider configuration available.");
+              throw geminiErr;
             }
           }
-        } catch (secondError: any) {
-          console.error("Backup AI provider also failed, serving beautifully customized programmatic fallback structure.", secondError.message || secondError);
         }
+      } catch (authError: any) {
+        console.error("All AI providers and fallbacks failed to generate website structure cleanly.", authError.message || authError);
       }
 
       if (!textOutput) {
@@ -588,9 +656,7 @@ async function startServer() {
       const systemInstruction = "You are a professional copywriter. Rewrite or refine the section according to instructions, and return ONLY a valid JSON block mapping the same structure as the input section.";
 
       const buildGeminiRefinement = async () => {
-        const client = getGeminiClient();
-        const response = await client.models.generateContent({
-          model: "gemini-3.5-flash",
+        const response = await generateContentWithRetryAndFallback({
           contents: prompt,
           config: {
             systemInstruction,
@@ -630,28 +696,27 @@ async function startServer() {
       try {
         if (isUsingOpenAI()) {
           console.log("Attempting OpenAI refinement...");
-          textOutput = await fetchOpenAI([{ role: "user", content: prompt }], systemInstruction);
-        } else {
-          console.log("Attempting Gemini refinement...");
-          textOutput = await buildGeminiRefinement();
-        }
-      } catch (firstError: any) {
-        console.warn("First choice AI provider failed for refinement, trying backup...", firstError.message || firstError);
-        try {
-          if (isUsingOpenAI()) {
-            console.log("Falling back to Gemini model for refinement...");
+          try {
+            textOutput = await fetchOpenAI([{ role: "user", content: prompt }], systemInstruction);
+          } catch (openaiErr: any) {
+            console.warn("OpenAI refinement failed, falling back to robust Gemini...", openaiErr.message || openaiErr);
             textOutput = await buildGeminiRefinement();
-          } else {
+          }
+        } else {
+          console.log("Attempting robust Gemini refinement...");
+          try {
+            textOutput = await buildGeminiRefinement();
+          } catch (geminiErr: any) {
             if (process.env.OPENAI_API_KEY || (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.startsWith("sk-"))) {
-              console.log("Falling back to OpenAI model for refinement...");
+              console.log("Gemini refinement failed, falling back to OpenAI model...");
               textOutput = await fetchOpenAI([{ role: "user", content: prompt }], systemInstruction);
             } else {
-              throw new Error("No backup provider configuration available.");
+              throw geminiErr;
             }
           }
-        } catch (secondError: any) {
-          console.error("Backup refinement provider also failed, serving programmed refinement fallback.", secondError.message || secondError);
         }
+      } catch (authError: any) {
+        console.error("All AI providers and fallbacks failed to refine section.", authError.message || authError);
       }
 
       if (!textOutput) {
@@ -694,9 +759,7 @@ async function startServer() {
       const systemInstruction = "Generate a single complete, beautiful website section. Return ONLY a valid JSON matching the schema.";
 
       const buildGeminiAddSection = async () => {
-        const client = getGeminiClient();
-        const response = await client.models.generateContent({
-          model: "gemini-3.5-flash",
+        const response = await generateContentWithRetryAndFallback({
           contents: userPrompt,
           config: {
             systemInstruction,
@@ -736,28 +799,27 @@ async function startServer() {
       try {
         if (isUsingOpenAI()) {
           console.log("Attempting OpenAI add-section...");
-          textOutput = await fetchOpenAI([{ role: "user", content: userPrompt }], systemInstruction);
-        } else {
-          console.log("Attempting Gemini add-section...");
-          textOutput = await buildGeminiAddSection();
-        }
-      } catch (firstError: any) {
-        console.warn("First choice AI provider failed for add-section, trying backup...", firstError.message || firstError);
-        try {
-          if (isUsingOpenAI()) {
-            console.log("Fallback to Gemini add-section...");
+          try {
+            textOutput = await fetchOpenAI([{ role: "user", content: userPrompt }], systemInstruction);
+          } catch (openaiErr: any) {
+            console.warn("OpenAI add-section failed, falling back to robust Gemini...", openaiErr.message || openaiErr);
             textOutput = await buildGeminiAddSection();
-          } else {
+          }
+        } else {
+          console.log("Attempting robust Gemini add-section...");
+          try {
+            textOutput = await buildGeminiAddSection();
+          } catch (geminiErr: any) {
             if (process.env.OPENAI_API_KEY || (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.startsWith("sk-"))) {
-              console.log("Fallback to OpenAI add-section...");
+              console.log("Gemini add-section failed, falling back to OpenAI model...");
               textOutput = await fetchOpenAI([{ role: "user", content: userPrompt }], systemInstruction);
             } else {
-              throw new Error("No backup provider configuration available.");
+              throw geminiErr;
             }
           }
-        } catch (secondError: any) {
-          console.error("Backup add-section provider also failed, serving custom programmed block instead.", secondError.message || secondError);
         }
+      } catch (authError: any) {
+        console.error("All AI providers and fallbacks failed to add section.", authError.message || authError);
       }
 
       if (!textOutput) {
@@ -862,25 +924,10 @@ async function startServer() {
   app.post("/api/generate-image", async (req, res) => {
     const { prompt } = req.body;
     try {
-      const client = getGeminiClient();
       console.log("Generating custom image via gemini-2.5-flash-image for prompt:", prompt);
       const cleanPrompt = `${prompt}. Minimal modern vector illustration, isolated background, elegant corporate clean tech aesthetic, high resolution.`;
 
-      const response = await client.models.generateContent({
-        model: "gemini-2.5-flash-image",
-        contents: {
-          parts: [
-            {
-              text: cleanPrompt,
-            },
-          ],
-        },
-        config: {
-          imageConfig: {
-            aspectRatio: "16:9",
-          },
-        },
-      });
+      const response = await generateImageWithRetry(cleanPrompt);
 
       let foundImageBase64 = "";
       if (response.candidates?.[0]?.content?.parts) {
